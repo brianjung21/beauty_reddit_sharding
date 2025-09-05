@@ -10,8 +10,8 @@ DATA_CANDIDATES = [
     Path(__file__).parent,            # script folder
     Path(__file__).parent.parent / "data",  # one level up /data (fallback)
 ]
-PIVOT_FILE = "alias_pivoted_brand_counts.csv"
-RAW_MATCHES = "reddit_matches_raw.csv"
+PIVOT_FILE = "alias_pivoted_brand_counts30.csv"
+RAW_MATCHES = "reddit_matches_raw30.csv"
 
 DEFAULT_TOPN = 5
 
