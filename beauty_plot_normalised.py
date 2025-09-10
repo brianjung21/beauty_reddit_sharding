@@ -3,33 +3,29 @@ from typing import List, Optional
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import numpy as np
 
 # ---------------- Config ----------------
-DATA_CANDIDATES = [
-    Path(__file__).parent / "data",              # ./data next to this script
-    Path(__file__).parent,                       # script folder
-    Path(__file__).parent.parent / "data",       # one level up /data (fallback)
-]
+# Look ONLY in ./data relative to this script
+DATA_DIR = (Path(__file__).parent / "data").resolve()
 
 PIVOT_FILE = "beauty_alias_pivoted_brand_counts.csv"   # wide: date + one column per brand
-RAW_MATCHES = "reddit_matches_raw.csv"          # long: includes date, keyword (brand), alias, subreddit
-SUBS_TS_FILE = "subreddit_subscribers_timeseries.csv"  # optional: date, subreddit, subscribers
+RAW_MATCHES = "reddit_matches_raw.csv"                 # long: date, keyword, alias, subreddit, ...
 
 DEFAULT_TOPN = 5
 
 # ---------------- File helpers ----------------
 def find_file(fname: str) -> Path:
-    for base in DATA_CANDIDATES:
-        p = base / fname
-        if p.exists():
-            return p
-    raise FileNotFoundError(f"Could not find {fname} in any of: {[str(b) for b in DATA_CANDIDATES]}")
+    p = DATA_DIR / fname
+    if p.exists():
+        return p
+    raise FileNotFoundError(f"Could not find {fname} in: {DATA_DIR}")
 
 @st.cache_data(show_spinner=False)
 def load_pivot() -> pd.DataFrame:
     p = find_file(PIVOT_FILE)
     df = pd.read_csv(p, parse_dates=["date"])
-    # coerce numeric
+    # coerce numeric for brand columns
     for c in df.columns:
         if c != "date":
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
@@ -54,32 +50,12 @@ def load_raw_matches_or_none() -> Optional[pd.DataFrame]:
     except Exception:
         return None
 
-@st.cache_data(show_spinner=False)
-def load_subscriber_timeseries_or_none() -> Optional[pd.DataFrame]:
-    try:
-        p = find_file(SUBS_TS_FILE)
-    except FileNotFoundError:
-        return None
-    try:
-        sub = pd.read_csv(p, parse_dates=["date"])
-        # expect: date, subreddit, subscribers
-        needed = {"date", "subreddit", "subscribers"}
-        if not needed.issubset(sub.columns):
-            return None
-        sub["subreddit"] = sub["subreddit"].astype(str)
-        sub["subscribers"] = pd.to_numeric(sub["subscribers"], errors="coerce")
-        # Drop negative/NaN
-        sub = sub.dropna(subset=["subscribers"])
-        sub = sub[sub["subscribers"] >= 0].copy()
-        return sub
-    except Exception:
-        return None
-
 # ---------------- Transform helpers ----------------
 def resample_freq(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     if freq == "D":
         return df.set_index("date").asfreq("D").fillna(0).reset_index()
-    return df.set_index("date").resample("W").sum().reset_index()  # weekly sums
+    # Weekly sums
+    return df.set_index("date").resample("W").sum().reset_index()
 
 def to_long(df: pd.DataFrame, brands: List[str], value_col: str = "mentions") -> pd.DataFrame:
     cols = ["date"] + brands
@@ -102,15 +78,14 @@ def apply_rolling(long_df: pd.DataFrame, win: int) -> pd.DataFrame:
     return pd.concat(out, ignore_index=True)
 
 # ---------------- Normalization modes ----------------
-
 def compute_sov(long_df: pd.DataFrame) -> pd.DataFrame:
     """Share of Voice = brand_mentions / total_mentions_that_period (in %)"""
     totals = long_df.groupby("date", as_index=False)["mentions"].sum().rename(columns={"mentions": "total"})
     x = long_df.merge(totals, on="date", how="left")
-    x["value"] = (x["mentions"] / x["total"]).fillna(0) * 100.0
+    x["value"] = np.where(x["total"] > 0, (x["mentions"] / x["total"]) * 100.0, 0.0)
     return x[["date", "brand", "value"]]
 
-# --- SoV over a window (ratio of sums) ---
+# --- SoV over a window (ratio of sums, bounded 0–100%) ---
 def compute_window_sov(df_window: pd.DataFrame, brands_to_show: List[str]) -> pd.DataFrame:
     """
     df_window: wide frame with columns: date + brand columns (counts)
@@ -120,95 +95,49 @@ def compute_window_sov(df_window: pd.DataFrame, brands_to_show: List[str]) -> pd
     """
     if df_window.empty:
         return pd.DataFrame({"brand": [], "value": []})
-    # Total across all brands per date
     totals_by_date = df_window.drop(columns=["date"]).sum(axis=1).rename("total")
     totals_df = pd.DataFrame({"date": df_window["date"], "total": totals_by_date})
-    # Melt selected brands
     brands = [b for b in brands_to_show if b in df_window.columns]
     if not brands:
         return pd.DataFrame({"brand": [], "value": []})
     m = df_window[["date"] + brands].melt("date", var_name="brand", value_name="mentions")
     m = m.merge(totals_df, on="date", how="left")
-    # Ratio of sums across the window
     sums = m.groupby("brand", as_index=False).agg({"mentions": "sum", "total": "sum"})
     sums["value"] = (sums["mentions"] / sums["total"]).fillna(0) * 100.0
     return sums[["brand", "value"]]
-
-def compute_subreddit_normalized(raw: pd.DataFrame,
-                                 subs_ts: pd.DataFrame,
-                                 brands: List[str],
-                                 freq: str,
-                                 date_range: tuple[pd.Timestamp, pd.Timestamp]) -> Optional[pd.DataFrame]:
-    """
-    For each period (day/week), compute:
-        sum_over_subreddits( brand_mentions_sub / (subscribers_sub / 10,000) )
-    Then sum across subreddits to get a brand’s normalized value.
-    Returns long df: date | brand | value
-    """
-    if raw is None or subs_ts is None:
-        return None
-
-    start_date, end_date = date_range
-    raw2 = raw[(raw["date"] >= pd.to_datetime(start_date)) & (raw["date"] <= pd.to_datetime(end_date))].copy()
-    raw2["keyword"] = raw2["keyword"].astype(str)
-    if brands:
-        raw2 = raw2[raw2["keyword"].isin(brands)]
-
-    # 1) Count mentions per (date, subreddit, keyword)
-    raw2["mentions"] = 1
-    grp = (raw2.groupby([raw2["date"].dt.normalize(), "subreddit", "keyword"], as_index=False)["mentions"]
-                .sum()
-                .rename(columns={"date": "date", "keyword": "brand"}))
-
-    # 2) Resample subscribers time series to same frequency
-    subs = subs_ts.copy()
-    subs["date"] = subs["date"].dt.normalize()
-    if freq == "W":
-        subs = subs.set_index("date").groupby("subreddit").resample("W").last().reset_index()
-
-    # 3) Join and normalize per subreddit
-    merged = grp.merge(subs, on=["date", "subreddit"], how="left")
-    # If a subreddit has no subscriber reading for that period, drop it (or impute forward-fill in your source file)
-    merged = merged.dropna(subset=["subscribers"])
-
-    merged["denom"] = (merged["subscribers"] / 10000.0).replace(0, pd.NA)
-    merged = merged.dropna(subset=["denom"])
-    merged["norm"] = merged["mentions"] / merged["denom"]
-
-    # 4) Aggregate across subreddits to date × brand
-    out = (merged.groupby(["date", "brand"], as_index=False)["norm"]
-                 .sum()
-                 .rename(columns={"norm": "value"}))
-
-    if freq == "W":
-        out = out.set_index("date").groupby("brand").resample("W").sum().reset_index()
-
-    return out
 
 # ---------------- UI ----------------
 st.set_page_config(page_title="Reddit Brand Mentions — Normalized", layout="wide")
 st.title("Reddit Brand Mentions — Normalized Views")
 
+# Sidebar controls
+with st.sidebar:
+    st.header("Controls")
+    # Quick cache-clear to ensure latest CSVs are loaded
+    if st.button("🔄 Refresh from disk"):
+        st.cache_data.clear()
+
 # Load data
 try:
-    df = load_pivot()                 # wide daily brand counts
+    df = load_pivot()  # wide daily brand counts
 except FileNotFoundError as e:
     st.error(str(e))
     st.stop()
 
-raw = load_raw_matches_or_none()      # optional, needed for subreddit-normalized
-subs_ts = load_subscriber_timeseries_or_none()  # optional
+# Show loaded range so you can verify latest dates are present
+st.caption(f"Loaded data range: {df['date'].min().date()} → {df['date'].max().date()} (UTC)")
+
+raw = load_raw_matches_or_none()  # for drilldowns (optional)
 
 all_brands = [c for c in df.columns if c != "date"]
 
 with st.sidebar:
-    st.header("Controls")
     freq_label = st.radio("Frequency", ["Daily", "Weekly"], index=0)
     freq = "D" if freq_label == "Daily" else "W"
 
     norm_mode = st.radio(
         "Normalization",
-        ["Raw counts", "Share of Voice (SoV)", "Subreddit-normalized (needs subscribers CSV)"],
+        ["Raw counts", "Share of Voice (SoV)"],
         index=1  # default to SoV to reduce platform drift
     )
 
@@ -229,7 +158,7 @@ with st.sidebar:
     mask = (df_freq["date"].dt.date >= start_date) & (df_freq["date"].dt.date <= end_date)
     df_win = df_freq.loc[mask].copy()
 
-    # Brand selection (defaults: top-N by raw counts over window so user isn't confused)
+    # Brand selection (defaults: top-N by raw counts over window)
     defaults = default_top_brands(df_win, DEFAULT_TOPN) if not df_win.empty else []
     selected = st.multiselect("Brands", options=all_brands, default=defaults)
 
@@ -254,36 +183,13 @@ if norm_mode == "Raw counts":
     long_metric = long_counts.rename(columns={"mentions": "value"}).copy()
     y_label = "Mentions"
 
-elif norm_mode == "Share of Voice (SoV)":
-    # SoV over ALL brands (not just selected) to truly remove platform drift
+else:  # Share of Voice (SoV)
+    # SoV over ALL brands (not just selected) to remove platform drift
     df_win_all = df_win.copy()
     long_all = to_long(df_win_all, [c for c in df_win_all.columns if c != "date"], value_col="mentions")
     sov_all = compute_sov(long_all)
     long_metric = sov_all[sov_all["brand"].isin(selected)].copy()
     y_label = "Share of Voice (%)"
-
-else:  # Subreddit-normalized
-    norm_df = compute_subreddit_normalized(
-        raw=raw,
-        subs_ts=subs_ts,
-        brands=selected,
-        freq=freq,
-        date_range=(pd.to_datetime(start_date), pd.to_datetime(end_date)),
-    )
-    if norm_df is None:
-        st.warning("Subreddit subscribers time series not found or invalid. Falling back to Share of Voice (SoV).")
-        df_win_all = df_win.copy()
-        long_all = to_long(df_win_all, [c for c in df_win_all.columns if c != "date"], value_col="mentions")
-        sov_all = compute_sov(long_all)
-        long_metric = sov_all[sov_all["brand"].isin(selected)].copy()
-        y_label = "Share of Voice (%)"
-    else:
-        # Ensure full grid (dates × selected brands), fill 0
-        all_dates = pd.DataFrame({"date": sorted(df_win["date"].unique())})
-        all_brands_df = pd.DataFrame({"brand": selected})
-        full = all_dates.assign(_k=1).merge(all_brands_df.assign(_k=1), on="_k").drop(columns="_k")
-        long_metric = full.merge(norm_df, on=["date", "brand"], how="left").fillna({"value": 0})
-        y_label = "Mentions per 10k subscribers (summed across subs)"
 
 # Plot
 if do_smooth:
@@ -335,8 +241,7 @@ if norm_mode == "Raw counts":
     top10 = top_totals.head(10).reset_index().rename(columns={"index": "brand", 0: "value"})
     top10.columns = ["brand", "value"]
     y_top = "Mentions"
-elif norm_mode == "Share of Voice (SoV)":
-    # SoV over full dataset: ratio of sums across all brands
+else:  # SoV over full dataset: ratio of sums
     full_counts = resample_freq(load_pivot(), freq)
     totals_by_date_full = full_counts.drop(columns=["date"]).sum(axis=1).rename("total")
     totals_df_full = pd.DataFrame({"date": full_counts["date"], "total": totals_by_date_full})
@@ -346,38 +251,6 @@ elif norm_mode == "Share of Voice (SoV)":
     sums_full["value"] = (sums_full["mentions"] / sums_full["total"]).fillna(0) * 100.0
     top10 = sums_full.sort_values("value", ascending=False).head(10)
     y_top = "SoV over dataset (%)"
-else:
-    # Subreddit-normalized over full available range for selected brands (use all brands for top-10)
-    if raw is not None and subs_ts is not None:
-        start_all, end_all = load_pivot()["date"].min(), load_pivot()["date"].max()
-        norm_all = compute_subreddit_normalized(
-            raw=raw, subs_ts=subs_ts, brands=[c for c in load_pivot().columns if c != "date"],
-            freq=freq, date_range=(start_all, end_all)
-        )
-        if norm_all is not None and not norm_all.empty:
-            top10 = (norm_all.groupby("brand", as_index=False)["value"].sum()
-                              .sort_values("value", ascending=False).head(10))
-            y_top = "Mentions per 10k subs (sum)"
-        else:
-            full_counts = resample_freq(load_pivot(), freq)
-            totals_by_date_full = full_counts.drop(columns=["date"]).sum(axis=1).rename("total")
-            totals_df_full = pd.DataFrame({"date": full_counts["date"], "total": totals_by_date_full})
-            long_full = full_counts.melt("date", var_name="brand", value_name="mentions")
-            long_full = long_full.merge(totals_df_full, on="date", how="left")
-            sums_full = long_full.groupby("brand", as_index=False).agg({"mentions": "sum", "total": "sum"})
-            sums_full["value"] = (sums_full["mentions"] / sums_full["total"]).fillna(0) * 100.0
-            top10 = sums_full.sort_values("value", ascending=False).head(10)
-            y_top = "SoV over dataset (%)"
-    else:
-        full_counts = resample_freq(load_pivot(), freq)
-        totals_by_date_full = full_counts.drop(columns=["date"]).sum(axis=1).rename("total")
-        totals_df_full = pd.DataFrame({"date": full_counts["date"], "total": totals_by_date_full})
-        long_full = full_counts.melt("date", var_name="brand", value_name="mentions")
-        long_full = long_full.merge(totals_df_full, on="date", how="left")
-        sums_full = long_full.groupby("brand", as_index=False).agg({"mentions": "sum", "total": "sum"})
-        sums_full["value"] = (sums_full["mentions"] / sums_full["total"]).fillna(0) * 100.0
-        top10 = sums_full.sort_values("value", ascending=False).head(10)
-        y_top = "SoV over dataset (%)"
 
 fig_top = px.bar(top10, x="brand", y="value", labels={"value": y_top, "brand": "Brand"})
 if norm_mode != "Raw counts":
@@ -385,7 +258,7 @@ if norm_mode != "Raw counts":
 st.plotly_chart(fig_top, use_container_width=True)
 st.dataframe(top10, use_container_width=True)
 
-# Top subreddits & top posts (raw drill-down, still useful in any normalization)
+# Top subreddits & top posts (raw drill-down; optional but handy)
 raw_df = load_raw_matches_or_none()
 with st.expander("Top subreddits for selected brands"):
     if raw_df is None:
@@ -417,4 +290,4 @@ with st.expander("Show top posts (raw)"):
         top_posts = rsub.sort_values("score", ascending=False)[cols].head(50)
         st.dataframe(top_posts, use_container_width=True)
 
-st.caption("Normalization modes: Raw counts; Share of Voice (brand / total %); Subreddit-normalized using subscribers time series if available.")
+st.caption("Normalization modes: Raw counts; Share of Voice (brand / total %).")
