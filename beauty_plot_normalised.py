@@ -11,8 +11,8 @@ DATA_CANDIDATES = [
     Path(__file__).parent.parent / "data",       # one level up /data (fallback)
 ]
 
-PIVOT_FILE = "alias_pivoted_brand_counts30.csv"   # wide: date + one column per brand
-RAW_MATCHES = "reddit_matches_raw30.csv"          # long: includes date, keyword (brand), alias, subreddit
+PIVOT_FILE = "beauty_alias_pivoted_brand_counts.csv"   # wide: date + one column per brand
+RAW_MATCHES = "reddit_matches_raw.csv"          # long: includes date, keyword (brand), alias, subreddit
 SUBS_TS_FILE = "subreddit_subscribers_timeseries.csv"  # optional: date, subreddit, subscribers
 
 DEFAULT_TOPN = 5
