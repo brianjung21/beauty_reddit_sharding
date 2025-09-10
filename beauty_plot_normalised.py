@@ -102,12 +102,37 @@ def apply_rolling(long_df: pd.DataFrame, win: int) -> pd.DataFrame:
     return pd.concat(out, ignore_index=True)
 
 # ---------------- Normalization modes ----------------
+
 def compute_sov(long_df: pd.DataFrame) -> pd.DataFrame:
     """Share of Voice = brand_mentions / total_mentions_that_period (in %)"""
     totals = long_df.groupby("date", as_index=False)["mentions"].sum().rename(columns={"mentions": "total"})
     x = long_df.merge(totals, on="date", how="left")
     x["value"] = (x["mentions"] / x["total"]).fillna(0) * 100.0
     return x[["date", "brand", "value"]]
+
+# --- SoV over a window (ratio of sums) ---
+def compute_window_sov(df_window: pd.DataFrame, brands_to_show: List[str]) -> pd.DataFrame:
+    """
+    df_window: wide frame with columns: date + brand columns (counts)
+    Returns per-brand SoV over the window in percent:
+        100 * sum(brand_mentions) / sum(total_mentions_all_brands)
+    Only returns rows for brands_to_show.
+    """
+    if df_window.empty:
+        return pd.DataFrame({"brand": [], "value": []})
+    # Total across all brands per date
+    totals_by_date = df_window.drop(columns=["date"]).sum(axis=1).rename("total")
+    totals_df = pd.DataFrame({"date": df_window["date"], "total": totals_by_date})
+    # Melt selected brands
+    brands = [b for b in brands_to_show if b in df_window.columns]
+    if not brands:
+        return pd.DataFrame({"brand": [], "value": []})
+    m = df_window[["date"] + brands].melt("date", var_name="brand", value_name="mentions")
+    m = m.merge(totals_df, on="date", how="left")
+    # Ratio of sums across the window
+    sums = m.groupby("brand", as_index=False).agg({"mentions": "sum", "total": "sum"})
+    sums["value"] = (sums["mentions"] / sums["total"]).fillna(0) * 100.0
+    return sums[["brand", "value"]]
 
 def compute_subreddit_normalized(raw: pd.DataFrame,
                                  subs_ts: pd.DataFrame,
@@ -288,10 +313,18 @@ st.plotly_chart(fig, use_container_width=True)
 
 # Summary (current window) — by current normalization
 st.subheader(f"Summary (current window) — {norm_mode}")
-summary = (
-    long_metric.groupby("brand", as_index=False)["value"].sum()
-               .sort_values("value", ascending=False)
-)
+if norm_mode == "Raw counts":
+    summary = (
+        long_metric.groupby("brand", as_index=False)["value"].sum()
+                  .sort_values("value", ascending=False)
+                  .rename(columns={"value": "Mentions"})
+    )
+else:
+    # True SoV over the window: ratio of sums across all brands
+    sov_window = compute_window_sov(df_win, selected)
+    summary = sov_window.sort_values("value", ascending=False).rename(columns={"value": "SoV over window (%)"})
+    summary["SoV over window (%)"] = summary["SoV over window (%)"].round(2)
+
 st.dataframe(summary, use_container_width=True)
 
 # Top 10 brands (entire dataset) — by current normalization
@@ -303,12 +336,16 @@ if norm_mode == "Raw counts":
     top10.columns = ["brand", "value"]
     y_top = "Mentions"
 elif norm_mode == "Share of Voice (SoV)":
+    # SoV over full dataset: ratio of sums across all brands
     full_counts = resample_freq(load_pivot(), freq)
-    long_all = to_long(full_counts, [c for c in full_counts.columns if c != "date"], value_col="mentions")
-    sov_all = compute_sov(long_all)
-    top10 = (sov_all.groupby("brand", as_index=False)["value"].mean()
-                    .sort_values("value", ascending=False).head(10))
-    y_top = "Avg SoV (%)"
+    totals_by_date_full = full_counts.drop(columns=["date"]).sum(axis=1).rename("total")
+    totals_df_full = pd.DataFrame({"date": full_counts["date"], "total": totals_by_date_full})
+    long_full = full_counts.melt("date", var_name="brand", value_name="mentions")
+    long_full = long_full.merge(totals_df_full, on="date", how="left")
+    sums_full = long_full.groupby("brand", as_index=False).agg({"mentions": "sum", "total": "sum"})
+    sums_full["value"] = (sums_full["mentions"] / sums_full["total"]).fillna(0) * 100.0
+    top10 = sums_full.sort_values("value", ascending=False).head(10)
+    y_top = "SoV over dataset (%)"
 else:
     # Subreddit-normalized over full available range for selected brands (use all brands for top-10)
     if raw is not None and subs_ts is not None:
@@ -322,23 +359,29 @@ else:
                               .sort_values("value", ascending=False).head(10))
             y_top = "Mentions per 10k subs (sum)"
         else:
-            # fallback to SoV if no subscriber data available
             full_counts = resample_freq(load_pivot(), freq)
-            long_all = to_long(full_counts, [c for c in full_counts.columns if c != "date"], value_col="mentions")
-            sov_all = compute_sov(long_all)
-            top10 = (sov_all.groupby("brand", as_index=False)["value"].mean()
-                            .sort_values("value", ascending=False).head(10))
-            y_top = "Avg SoV (%)"
+            totals_by_date_full = full_counts.drop(columns=["date"]).sum(axis=1).rename("total")
+            totals_df_full = pd.DataFrame({"date": full_counts["date"], "total": totals_by_date_full})
+            long_full = full_counts.melt("date", var_name="brand", value_name="mentions")
+            long_full = long_full.merge(totals_df_full, on="date", how="left")
+            sums_full = long_full.groupby("brand", as_index=False).agg({"mentions": "sum", "total": "sum"})
+            sums_full["value"] = (sums_full["mentions"] / sums_full["total"]).fillna(0) * 100.0
+            top10 = sums_full.sort_values("value", ascending=False).head(10)
+            y_top = "SoV over dataset (%)"
     else:
-        # fallback to SoV if file not present
         full_counts = resample_freq(load_pivot(), freq)
-        long_all = to_long(full_counts, [c for c in full_counts.columns if c != "date"], value_col="mentions")
-        sov_all = compute_sov(long_all)
-        top10 = (sov_all.groupby("brand", as_index=False)["value"].mean()
-                        .sort_values("value", ascending=False).head(10))
-        y_top = "Avg SoV (%)"
+        totals_by_date_full = full_counts.drop(columns=["date"]).sum(axis=1).rename("total")
+        totals_df_full = pd.DataFrame({"date": full_counts["date"], "total": totals_by_date_full})
+        long_full = full_counts.melt("date", var_name="brand", value_name="mentions")
+        long_full = long_full.merge(totals_df_full, on="date", how="left")
+        sums_full = long_full.groupby("brand", as_index=False).agg({"mentions": "sum", "total": "sum"})
+        sums_full["value"] = (sums_full["mentions"] / sums_full["total"]).fillna(0) * 100.0
+        top10 = sums_full.sort_values("value", ascending=False).head(10)
+        y_top = "SoV over dataset (%)"
 
 fig_top = px.bar(top10, x="brand", y="value", labels={"value": y_top, "brand": "Brand"})
+if norm_mode != "Raw counts":
+    top10["value"] = top10["value"].round(2)
 st.plotly_chart(fig_top, use_container_width=True)
 st.dataframe(top10, use_container_width=True)
 
