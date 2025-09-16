@@ -12,9 +12,9 @@ import re
 import unicodedata
 import prawcore
 
-CLIENT_ID = "GHBnVWNi9oton50-H7IRMQ"
-CLIENT_SECRET = "DCgsCWWyDq1UUS629RFl7Wxy8IXnyA"
-USER_AGENT = "research"
+CLIENT_ID = "loser"
+CLIENT_SECRET = "loser"
+USER_AGENT = "loser"
 
 KEYWORDS_PATH = Path("files/beauty_keywords_with_aliases.csv")
 OUTPUT_PATH = Path("data/beauty_alias_brand_daily_counts.csv")

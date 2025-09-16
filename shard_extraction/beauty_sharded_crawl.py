@@ -13,9 +13,9 @@ import prawcore
 
 
 # ============ CONFIG ============
-CLIENT_ID = "GHBnVWNi9oton50-H7IRMQ"
-CLIENT_SECRET = "DCgsCWWyDq1UUS629RFl7Wxy8IXnyA"
-USER_AGENT = "research"
+CLIENT_ID = "loser"
+CLIENT_SECRET = "loser"
+USER_AGENT = "loser"
 
 VALID_SUBREDDITS_CSV = Path("../daily_extraction/files/beauty_subreddits_30.csv")  # column: subreddit (e.g., r/ramen)
 KEYWORDS_CSV = Path("../daily_extraction/files/beauty_keywords_with_aliases.csv") # columns: Keyword, Aliases (pipe-separated)
