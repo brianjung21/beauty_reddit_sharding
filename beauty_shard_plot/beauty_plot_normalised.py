@@ -1,7 +1,7 @@
 """
 kpop_shard_plot_2.py
 
-K-pop Reddit brand intelligence dashboard:
+Beauty Reddit brand intelligence dashboard:
 - Core: Load pivoted daily/weekly brand mention counts, plot Raw or SoV, top brands, top posts/subreddits
 - New: Spike detector + drivers, Engagement-weighted mentions, Subreddit mix/diffusion,
        Sentiment overlay (optional, if cache exists), Momentum vs Attention quadrant
@@ -169,8 +169,8 @@ def load_sentiment_cache_or_none() -> Optional[pd.DataFrame]:
 # -----------------------------
 # App
 # -----------------------------
-st.set_page_config(page_title="K-pop Reddit Intelligence (Sharded)", layout="wide")
-st.title("K-pop Reddit Intelligence — Sharded (Interactive)")
+st.set_page_config(page_title="Beauty Reddit Intelligence (Sharded)", layout="wide")
+st.title("Beauty Reddit Intelligence — Sharded (Interactive)")
 
 try:
     df = load_pivot()
@@ -238,7 +238,7 @@ if do_smooth:
     long_smooth = apply_rolling(long_plot, freq=freq, win_daily=win_daily, win_weekly=win_weekly)
     fig_main = px.line(
         long_smooth, x="date", y="smoothed", color="brand",
-        title=f"K-pop brand trends ({freq_label}) — {norm_mode}",
+        title=f"Beauty brand trends ({freq_label}) — {norm_mode}",
         labels={"smoothed": y_label, "date": "Date"}
     )
     fig_raw = px.line(long_metric, x="date", y="value", color="brand")
@@ -248,7 +248,7 @@ if do_smooth:
 else:
     fig_main = px.line(
         long_metric, x="date", y="value", color="brand",
-        title=f"K-pop brand trends ({freq_label}) — {norm_mode}",
+        title=f"Beauty brand trends ({freq_label}) — {norm_mode}",
         labels={"value": y_label, "date": "Date"}
     )
 
